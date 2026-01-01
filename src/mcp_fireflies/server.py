@@ -14,6 +14,7 @@ from mcp.types import (
 
 from .auth import get_api_key
 from .client import FirefliesClient
+from .sync import TranscriptSync
 
 # Initialize MCP server
 server = Server("mcp-fireflies")
@@ -189,12 +190,86 @@ async def list_tools() -> list[Tool]:
                 "required": ["transcript_id"],
             },
         ),
+        # Local sync tools
+        Tool(
+            name="sync_transcripts",
+            description="Sync transcripts from Fireflies to local storage for offline search",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Days of history to sync (default: 5)",
+                        "default": 5,
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": "Force re-sync existing transcripts",
+                        "default": False,
+                    },
+                },
+            },
+        ),
+        Tool(
+            name="search_local",
+            description="Search locally synced transcripts by keyword (faster, offline)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum results (default: 20)",
+                        "default": 20,
+                    },
+                },
+                "required": ["query"],
+            },
+        ),
+        Tool(
+            name="get_local_transcript",
+            description="Read transcript from local storage (offline, faster)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "transcript_id": {
+                        "type": "string",
+                        "description": "Transcript ID or partial ID",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "Output format: txt, srt, or json (default: txt)",
+                        "enum": ["txt", "srt", "json"],
+                        "default": "txt",
+                    },
+                },
+                "required": ["transcript_id"],
+            },
+        ),
+        Tool(
+            name="local_sync_stats",
+            description="Show local sync statistics",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
     ]
+
+
+LOCAL_TOOLS = {"sync_transcripts", "search_local", "get_local_transcript", "local_sync_stats"}
 
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Handle tool calls."""
+    # Route local tools to their handler
+    if name in LOCAL_TOOLS:
+        return await handle_local_tools(name, arguments)
+
     api_key = get_api_key()
     if not api_key:
         return [
@@ -289,6 +364,126 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
+
+    except Exception as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+async def handle_local_tools(name: str, arguments: dict) -> list[TextContent]:
+    """Handle local sync tools (no API key required for read operations)."""
+    try:
+        sync = TranscriptSync()
+
+        if name == "sync_transcripts":
+            api_key = get_api_key()
+            if not api_key:
+                return [
+                    TextContent(
+                        type="text",
+                        text="Error: Fireflies API key not configured for sync.\n"
+                        "Run: `fireflies-auth store`",
+                    )
+                ]
+
+            days = arguments.get("days", 5)
+            force = arguments.get("force", False)
+
+            synced = []
+            def progress(current, total, transcript):
+                synced.append(transcript.title)
+
+            stats = await sync.sync(days=days, force=force, progress_callback=progress)
+
+            lines = [
+                f"**Sync Complete**",
+                f"- Found: {stats['total']}",
+                f"- Synced: {stats['synced']}",
+                f"- Skipped (already synced): {stats['skipped']}",
+            ]
+            if stats["errors"]:
+                lines.append(f"- Errors: {stats['errors']}")
+            if synced:
+                lines.extend(["", "**Synced transcripts:**"])
+                for title in synced[:10]:
+                    lines.append(f"- {title[:50]}")
+                if len(synced) > 10:
+                    lines.append(f"- ...and {len(synced) - 10} more")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "search_local":
+            query = arguments["query"]
+            limit = arguments.get("limit", 20)
+
+            results = sync.search(query, limit=limit)
+
+            if not results:
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"No local transcripts found matching '{query}'.\n"
+                        "Run `sync_transcripts` first to download transcripts.",
+                    )
+                ]
+
+            lines = [f"Found {len(results)} local transcripts matching '{query}':\n"]
+            for t in results:
+                date_str = "Unknown"
+                if t["date"]:
+                    date_str = datetime.fromtimestamp(t["date"] / 1000).strftime("%Y-%m-%d")
+                lines.append(f"**{t['title']}**")
+                lines.append(f"- ID: `{t['id']}`")
+                lines.append(f"- Date: {date_str}")
+                if t.get("summary"):
+                    lines.append(f"- Summary: {t['summary'][:150]}...")
+                lines.append("")
+
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "get_local_transcript":
+            transcript_id = arguments["transcript_id"]
+            fmt = arguments.get("format", "txt")
+
+            # Find full ID from partial
+            transcripts = sync.list_transcripts(limit=1000)
+            full_id = None
+            for t in transcripts:
+                if t["id"].startswith(transcript_id):
+                    full_id = t["id"]
+                    break
+
+            if not full_id:
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Transcript not found locally: {transcript_id}\n"
+                        "Run `sync_transcripts` first.",
+                    )
+                ]
+
+            content = sync.get_transcript_content(full_id, format=fmt)
+            if content:
+                return [TextContent(type="text", text=content)]
+            else:
+                return [
+                    TextContent(
+                        type="text",
+                        text=f"Content not available in format: {fmt}",
+                    )
+                ]
+
+        elif name == "local_sync_stats":
+            stats = sync.stats()
+            lines = [
+                "**Local Sync Statistics**",
+                f"- Total transcripts: {stats['total_transcripts']}",
+                f"- Last sync: {stats['last_sync'] or 'Never'}",
+                f"- Storage: {stats['storage_dir']}",
+                f"- Storage size: {stats['storage_size_mb']} MB",
+            ]
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        return [TextContent(type="text", text=f"Unknown local tool: {name}")]
 
     except Exception as e:
         return [TextContent(type="text", text=f"Error: {e}")]

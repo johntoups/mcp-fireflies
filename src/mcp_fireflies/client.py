@@ -241,8 +241,8 @@ class FirefliesClient:
         Returns:
             Matching transcripts
         """
-        # Fetch more transcripts to search through
-        transcripts = await self.list_transcripts(limit=100)
+        # Fetch transcripts to search through (API max is 50)
+        transcripts = await self.list_transcripts(limit=50)
 
         keyword_lower = keyword.lower()
         matches = []

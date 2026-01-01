@@ -38,7 +38,8 @@ dev = [
 
 [project.scripts]
 mcp-fireflies = "mcp_fireflies.server:main"
-fireflies-auth = "mcp_fireflies.auth:cli"
+fireflies-auth = "mcp_fireflies.cli:main_auth"
+fireflies-sync = "mcp_fireflies.cli:main_sync"
 
 [project.urls]
 Homepage = "https://github.com/johntoups/mcp-fireflies"
