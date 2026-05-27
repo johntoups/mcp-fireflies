@@ -234,11 +234,25 @@ class TranscriptSync:
         }
 
         async with FirefliesClient(api_key) as client:
-            # Get list of transcripts (API max is 50)
-            transcripts = await client.list_transcripts(
-                limit=50,
-                from_date=sync_from,
-            )
+            # Get list of transcripts with pagination (API max is 50 per request)
+            transcripts = []
+            skip = 0
+            batch_size = 50
+
+            while True:
+                batch = await client.list_transcripts(
+                    limit=batch_size,
+                    skip=skip,
+                    from_date=sync_from,
+                )
+                if not batch:
+                    break
+                transcripts.extend(batch)
+                if len(batch) < batch_size:
+                    break  # No more results
+                skip += batch_size
+                await asyncio.sleep(0.5)  # Rate limit: avoid API throttling
+
             stats["total"] = len(transcripts)
 
             for i, t in enumerate(transcripts):
@@ -264,6 +278,9 @@ class TranscriptSync:
                     paths = self._save_transcript(full_transcript)
                     self._index_transcript(full_transcript, paths)
                     stats["synced"] += 1
+
+                    # Rate limit: small delay between transcript fetches
+                    await asyncio.sleep(0.3)
 
                 except Exception as e:
                     stats["errors"] += 1
