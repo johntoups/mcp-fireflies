@@ -178,7 +178,7 @@ class TranscriptSync:
                     transcript.organizer_email,
                     ",".join(transcript.participants),
                     transcript.summary,
-                    "|".join(transcript.action_items) if transcript.action_items else None,
+                    "\n".join(transcript.action_items) if transcript.action_items else None,
                     paths.get("srt"),
                     paths.get("txt"),
                     paths.get("json"),

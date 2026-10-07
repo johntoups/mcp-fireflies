@@ -25,6 +25,19 @@ class Transcript:
     sentences: list[dict] | None  # Full transcript sentences
 
 
+def _normalize_action_items(raw: str | list[str] | None) -> list[str]:
+    """Return action items as a list of non-empty lines.
+
+    The Fireflies API returns summary.action_items as one Markdown string, not a
+    list; treating that string as a list splits it into single characters.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        return [line for line in raw.splitlines() if line.strip()]
+    return [str(item) for item in raw if str(item).strip()]
+
+
 @dataclass
 class MeetingAnalytics:
     """Meeting analytics data."""
@@ -161,7 +174,7 @@ class FirefliesClient:
                     participants=t.get("participants") or [],
                     transcript_url=t.get("transcript_url"),
                     summary=summary_data.get("overview"),
-                    action_items=summary_data.get("action_items") or [],
+                    action_items=_normalize_action_items(summary_data.get("action_items")),
                     sentences=None,
                 )
             )
@@ -223,7 +236,7 @@ class FirefliesClient:
             participants=t.get("participants") or [],
             transcript_url=t.get("transcript_url"),
             summary=summary_data.get("overview"),
-            action_items=summary_data.get("action_items") or [],
+            action_items=_normalize_action_items(summary_data.get("action_items")),
             sentences=t.get("sentences"),
         )
 
