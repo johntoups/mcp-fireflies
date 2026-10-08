@@ -218,12 +218,11 @@ class TranscriptSync:
         if not api_key:
             raise ValueError("Fireflies API key not configured")
 
-        last_sync = self._get_last_sync()
+        # Always scan the full window. Fireflies dates a transcript by meeting
+        # start, and long meetings finish processing hours later, so narrowing
+        # the window to the last sync time skips them permanently. Already-synced
+        # transcripts are skipped below, so the full window costs only list calls.
         sync_from = datetime.now() - timedelta(days=days)
-
-        # Use last sync time if more recent and not forcing
-        if last_sync and last_sync > sync_from and not force:
-            sync_from = last_sync
 
         stats = {
             "total": 0,
@@ -262,8 +261,11 @@ class TranscriptSync:
                 try:
                     # Check if already synced
                     with sqlite3.connect(self.db_path) as conn:
+                        # A row without a txt file was synced before Fireflies
+                        # finished processing the transcript; fetch it again.
                         existing = conn.execute(
-                            "SELECT id FROM transcripts WHERE id = ?", (t.id,)
+                            "SELECT id FROM transcripts WHERE id = ? AND txt_path IS NOT NULL",
+                            (t.id,),
                         ).fetchone()
                         if existing and not force:
                             stats["skipped"] += 1
