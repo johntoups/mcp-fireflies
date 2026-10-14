@@ -1,7 +1,7 @@
 """Fireflies.ai GraphQL API client."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -23,6 +23,14 @@ class Transcript:
     summary: str | None
     action_items: list[str]
     sentences: list[dict] | None  # Full transcript sentences
+
+
+def _iso_utc(value: datetime) -> str:
+    """Format a datetime for the API's DateTime arguments (UTC, ISO 8601).
+
+    Naive datetimes are local time, matching how transcript dates are parsed.
+    """
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _normalize_action_items(raw: str | list[str] | None) -> list[str]:
@@ -118,15 +126,20 @@ class FirefliesClient:
         Args:
             limit: Maximum number of transcripts to return
             skip: Number of transcripts to skip (pagination)
-            from_date: Filter transcripts after this date
-            to_date: Filter transcripts before this date
+            from_date: Only transcripts on or after this date
+            to_date: Only transcripts on or before this date
+
+        The date window is applied by the API (fromDate/toDate), so limit and
+        skip page within the window. Filtering a page of the newest transcripts
+        on the client instead returned nothing for any window older than that
+        page.
 
         Returns:
             List of transcript summaries
         """
         query = """
-        query Transcripts($limit: Int, $skip: Int) {
-            transcripts(limit: $limit, skip: $skip) {
+        query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTime) {
+            transcripts(limit: $limit, skip: $skip, fromDate: $fromDate, toDate: $toDate) {
                 id
                 title
                 date
@@ -142,7 +155,11 @@ class FirefliesClient:
         }
         """
 
-        variables = {"limit": limit, "skip": skip}
+        variables: dict[str, Any] = {"limit": limit, "skip": skip}
+        if from_date:
+            variables["fromDate"] = _iso_utc(from_date)
+        if to_date:
+            variables["toDate"] = _iso_utc(to_date)
         data = await self._query(query, variables)
 
         transcripts = []
@@ -156,7 +173,7 @@ class FirefliesClient:
                 except (ValueError, TypeError):
                     pass
 
-            # Filter by date if specified
+            # The API already applied the window; this guards its boundaries.
             if date:
                 if from_date and date < from_date:
                     continue

@@ -203,13 +203,17 @@ class TranscriptSync:
         days: int = 5,
         force: bool = False,
         progress_callback=None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
     ) -> dict:
         """Sync transcripts from Fireflies.
 
         Args:
-            days: Number of days to sync (default: 5)
+            days: Number of days to sync (default: 5); ignored when from_date is set
             force: Force re-sync even if already synced
             progress_callback: Optional callback(current, total, transcript)
+            from_date: Start of an explicit window, for backfilling older meetings
+            to_date: End of an explicit window (default: now)
 
         Returns:
             Sync statistics
@@ -222,7 +226,7 @@ class TranscriptSync:
         # start, and long meetings finish processing hours later, so narrowing
         # the window to the last sync time skips them permanently. Already-synced
         # transcripts are skipped below, so the full window costs only list calls.
-        sync_from = datetime.now() - timedelta(days=days)
+        sync_from = from_date or datetime.now() - timedelta(days=days)
 
         stats = {
             "total": 0,
@@ -243,6 +247,7 @@ class TranscriptSync:
                     limit=batch_size,
                     skip=skip,
                     from_date=sync_from,
+                    to_date=to_date,
                 )
                 if not batch:
                     break
@@ -288,7 +293,10 @@ class TranscriptSync:
                     stats["errors"] += 1
                     stats["error_details"].append(f"{t.id}: {e}")
 
-        self._set_last_sync(datetime.now())
+        # A backfill of an older window says nothing about how current the
+        # cache is, so only an open-ended sync moves the last-sync time.
+        if to_date is None:
+            self._set_last_sync(datetime.now())
         return stats
 
     def search(

@@ -3,7 +3,7 @@
 import asyncio
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -289,12 +289,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
                 from_date = None
                 if days:
+                    # Midnight N days ago. Subtracting from the day-of-month
+                    # clamped to the 1st and never reached the previous month.
                     from_date = datetime.now().replace(
                         hour=0, minute=0, second=0, microsecond=0
-                    )
-                    from_date = from_date.replace(
-                        day=from_date.day - days if from_date.day > days else 1
-                    )
+                    ) - timedelta(days=days)
 
                 transcripts = await client.list_transcripts(
                     limit=limit, from_date=from_date

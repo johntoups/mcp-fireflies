@@ -1,5 +1,7 @@
 """CLI commands for Fireflies MCP."""
 
+from datetime import timedelta
+
 import click
 
 from .auth import get_api_key, store_api_key, delete_api_key
@@ -55,9 +57,11 @@ def sync_cli():
 
 @sync_cli.command("run")
 @click.option("--days", "-d", default=5, help="Days to sync (default: 5)")
+@click.option("--from", "from_date", type=click.DateTime(["%Y-%m-%d"]), help="Backfill from this date (YYYY-MM-DD); overrides --days")
+@click.option("--to", "to_date", type=click.DateTime(["%Y-%m-%d"]), help="Backfill through this date (YYYY-MM-DD, inclusive)")
 @click.option("--force", "-f", is_flag=True, help="Force re-sync existing transcripts")
 @click.option("--quiet", "-q", is_flag=True, help="Suppress progress output")
-def sync_run(days: int, force: bool, quiet: bool):
+def sync_run(days: int, from_date, to_date, force: bool, quiet: bool):
     """Sync transcripts from Fireflies to local storage."""
     from .sync import TranscriptSync
     import asyncio
@@ -71,7 +75,14 @@ def sync_run(days: int, force: bool, quiet: bool):
 
     try:
         stats = asyncio.run(
-            sync.sync(days=days, force=force, progress_callback=progress)
+            sync.sync(
+                days=days,
+                force=force,
+                progress_callback=progress,
+                from_date=from_date,
+                # --to is a date; include the whole day.
+                to_date=to_date + timedelta(days=1) - timedelta(microseconds=1) if to_date else None,
+            )
         )
         click.echo(f"\nSync complete:")
         click.echo(f"  Total found: {stats['total']}")
