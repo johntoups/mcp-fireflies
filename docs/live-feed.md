@@ -54,17 +54,28 @@ Against the fake server (`tests/fake_fireflies.py`, same envelope), 18 tests in 
 
 End-to-end in Claude Code: `ff-live run` against the fake server, with Monitor tailing `digest.log`. Four digest events arrived in-session, with the hits marked, and the stop line was delivered.
 
-## Not verified
+## First live run (2026-11-10, HCA / Medaxion ARB Prep, about 61 min)
 
-The first real meeting answers most of these.
+**Confirmed by the run:**
+- Our Fireflies plan includes Realtime. Events flowed as soon as speech started, with the bot in the meeting.
+- 3,004 events merged into 784 chunks; all 784 settled; 117 digest lines at a 30s window. Only one revision arrived after the 4s settle, so 4s is enough.
+- Speaker names came from Fireflies diarisation and were reliable for named attendees.
+- One real transport drop at 13:18:58. The client reconnected in 3s, **but about 40s of meeting time (18:18-19:00) never arrived**. The server does not replay speech missed during a disconnect. The Fireflies post-meeting transcript is the complete record.
+- The SendMessage relay from the listener to a second top-level session (`hca-expanse-arb`) worked: 40+ relays plus the recap were delivered.
+- The listener caught several conflicts live (incoming-traffic claim, multi-region vs no Aurora Global, RAI scope), and pulled New Relic data mid-call on request.
 
-- **Plan entitlement.** Fireflies doesn't document which plans include Realtime. The handshake suggests our key is accepted, but no live event has been received yet.
-- **Bot requirement.** Whether events flow only when the Fireflies bot is in the meeting is undocumented, though transcription itself needs the bot.
-- **Latency, revision behaviour, timestamps.** We don't know the real latency, how often chunks are revised, whether a revision can arrive after `settle`, or whether `start_time` is relative to the meeting start. `late_revisions` in `status.json` counts revisions that arrive after settle, so the first meeting will show whether 4s is enough.
-- **Joining mid-meeting.** Whether connecting partway through delivers earlier speech is unknown.
-- **The SendMessage relay between two top-level sessions** was not exercised; doing so would have meant messaging a real session unasked. The Monitor leg was exercised.
+**Problems found:**
+- **Monitor truncates long notifications.** This is independent of `--max-chars`, and lines were cut at about 400-500 characters. Read `ff-live transcript -n 5` whenever a line ends in `...(truncated)`. A future fix: lower `--max-chars` to about 400, or split a window into one line per speaker turn.
+- **The active-meeting check failed** twice near the end with `ConnectError:` and no message. At the same moment a plain curl to the GraphQL endpoint answered, and the socket kept delivering. Cause not identified. Effect: the feed didn't detect the meeting end and was stopped by hand. Next step: log the full exception (`repr(e)` plus the cause chain), and reuse one long-lived `httpx.AsyncClient` instead of opening one per check.
+- **Monitor's 30-minute cap** needed two restarts. Restarting with `tail -n 2 -F` replays the last lines, so expect duplicates.
 
-## First live run (checklist)
+## Still not verified
+
+- Exact latency from speech to digest. It felt like the settle time plus up to one window; I haven't measured it.
+- Whether `start_time` is relative to the meeting start. The timestamps lined up with meeting time, but that wasn't checked against the Fireflies transcript.
+- Joining mid-meeting. The bot was in the meeting from the start this time.
+
+## Live run checklist
 
 1. Pick a meeting with no PHI and confirm that with John. The Fireflies bot must be in it.
 2. `ff-live meetings`, then `ff-live run -m <id> --window 30`, then Monitor on `digest.log`.
