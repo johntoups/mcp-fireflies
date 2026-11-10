@@ -13,6 +13,9 @@ Access your meeting transcripts, summaries, and action items directly from Claud
 | `get_summary` | Get AI-generated summary and action items |
 | `search_meetings` | Search transcripts by keyword |
 | `get_meeting_analytics` | Speaker talk time, word count, questions asked |
+| `live_active_meetings` | Meetings Fireflies is transcribing right now |
+| `live_status` | State of the local live feed (`ff-live`) |
+| `live_transcript` | Settled lines from the live feed: last N minutes or last N lines |
 
 ## Installation
 
@@ -100,6 +103,21 @@ Once configured, you can ask Claude:
 - "Search for meetings about project planning"
 - "What were the action items from the quarterly review?"
 - "Show me speaker analytics for meeting abc123"
+
+## Live meetings (`ff-live`)
+
+`ff-live` follows a meeting in progress through the Fireflies Realtime API (beta) and writes files that a Claude Code session can follow with its Monitor tool. Design, verified behaviour and open questions: [docs/live-feed.md](docs/live-feed.md).
+
+```bash
+ff-live meetings                        # what Fireflies is transcribing now
+ff-live run -m <id> --watch terms.txt   # stream one meeting until it ends (explicit id required)
+ff-live status | transcript -n 40 | stop
+ff-live replay events.jsonl --speed 5   # re-run a recorded session through the pipeline
+```
+
+Output goes to `~/.claude/personal/live/<id>/` (mode 0700; `FF_LIVE_DIR` overrides): `digest.log` has one line per window, which is what Monitor tails; `transcript.txt` holds settled lines, `status.json` the daemon state, and `events.jsonl` the raw events. Control lines in the digest start with `## `.
+
+In Claude Code: `tail -n0 -F ~/.claude/personal/live/<id>/digest.log` as a Monitor command. The `meeting-listen` skill in the workspace wraps the whole flow, including relaying to another session.
 
 ## Development
 

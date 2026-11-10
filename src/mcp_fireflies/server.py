@@ -257,10 +257,38 @@ async def list_tools() -> list[Tool]:
                 "properties": {},
             },
         ),
+        Tool(
+            name="live_status",
+            description="Status of the local live-meeting feed (ff-live): state, counts, last event, whether the daemon is running. Defaults to the current session.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "meeting": {"type": "string", "description": "transcript id (default: current)"},
+                },
+            },
+        ),
+        Tool(
+            name="live_transcript",
+            description="Settled lines from the live-meeting feed (ff-live). Use minutes for 'what was said in the last N minutes', or last for a line count.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "meeting": {"type": "string", "description": "transcript id (default: current)"},
+                    "minutes": {"type": "number", "description": "last N minutes of meeting time"},
+                    "last": {"type": "integer", "description": "last N lines (default 60)"},
+                },
+            },
+        ),
+        Tool(
+            name="live_active_meetings",
+            description="Meetings Fireflies is transcribing right now (id, title, start). Read-only API call.",
+            inputSchema={"type": "object", "properties": {}},
+        ),
     ]
 
 
 LOCAL_TOOLS = {"sync_transcripts", "search_local", "get_local_transcript", "local_sync_stats"}
+LIVE_TOOLS = {"live_status", "live_transcript", "live_active_meetings"}
 
 
 @server.call_tool()
@@ -269,6 +297,8 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     # Route local tools to their handler
     if name in LOCAL_TOOLS:
         return await handle_local_tools(name, arguments)
+    if name in LIVE_TOOLS:
+        return await handle_live_tools(name, arguments)
 
     api_key = get_api_key()
     if not api_key:
@@ -364,6 +394,35 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             else:
                 return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
+    except Exception as e:
+        return [TextContent(type="text", text=f"Error: {e}")]
+
+
+async def handle_live_tools(name: str, arguments: dict) -> list[TextContent]:
+    """Live-feed tools read the files ff-live writes; only live_active_meetings calls the API."""
+    from . import live
+
+    try:
+        if name == "live_status":
+            st = live.read_status(arguments.get("meeting"))
+            if st is None:
+                return [TextContent(type="text", text="No live session. Start one with `ff-live run --meeting <id>`.")]
+            return [TextContent(type="text", text=json.dumps(st, indent=2))]
+        if name == "live_transcript":
+            minutes = arguments.get("minutes")
+            last = arguments.get("last") or (None if minutes is not None else 60)
+            lines = live.transcript_tail(arguments.get("meeting"), minutes=minutes, last=last)
+            return [TextContent(type="text", text="\n".join(lines) or "(no settled lines yet)")]
+        if name == "live_active_meetings":
+            api_key = get_api_key()
+            if not api_key:
+                return [TextContent(type="text", text="Error: Fireflies API key not configured.")]
+            ms = await live.fetch_active_meetings(api_key)
+            if not ms:
+                return [TextContent(type="text", text="No active meetings.")]
+            return [TextContent(type="text", text="\n".join(
+                f"{m['id']} | {m.get('state')} | {m.get('start_time')} | {m.get('title')}" for m in ms))]
+        return [TextContent(type="text", text=f"Unknown tool: {name}")]
     except Exception as e:
         return [TextContent(type="text", text=f"Error: {e}")]
 
