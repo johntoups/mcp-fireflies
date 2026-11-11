@@ -14,11 +14,13 @@ import click
 
 from .auth import get_api_key
 from .live import (
+    DEFAULT_MAX_CHARS,
     LIVE_ROOT,
     REALTIME_URL,
     LiveFeed,
     LiveWriter,
     fetch_active_meetings,
+    follow,
     load_watch_terms,
     read_events,
     replay,
@@ -91,7 +93,12 @@ def meetings():
 @click.option(
     "--watch", "watch_file", type=click.Path(exists=True), help="File of watch terms, one per line"
 )
-@click.option("--max-chars", default=700, show_default=True, help="Cap on one digest line")
+@click.option(
+    "--max-chars",
+    default=DEFAULT_MAX_CHARS,
+    show_default=True,
+    help="Cap on one digest line (Monitor cuts notifications at about 400-500)",
+)
 @click.option(
     "--end-check", default=60.0, show_default=True, help="Seconds between active-meeting checks"
 )
@@ -155,7 +162,7 @@ def run(
 @click.option("--window", default=60.0, show_default=True, help="Digest window, in meeting seconds")
 @click.option("--settle", default=4.0, show_default=True, help="Settle time, in meeting seconds")
 @click.option("--watch", "watch_file", type=click.Path(exists=True))
-@click.option("--max-chars", default=700, show_default=True)
+@click.option("--max-chars", default=DEFAULT_MAX_CHARS, show_default=True)
 def replay_cmd(events_file, speed, as_id, window, settle, watch_file, max_chars):
     """Replay a recorded events.jsonl through the same pipeline (for tests and demos)."""
     sid = as_id or f"replay-{int(time.time())}"
@@ -199,6 +206,22 @@ def stop(meeting):
         return
     os.kill(pid, signal.SIGTERM)
     click.echo(f"Sent SIGTERM to {pid}.")
+
+
+@live.command("follow")
+@click.option("--meeting", "-m", default=None)
+@click.option("--from-end", is_flag=True, help="On the first follow, skip lines already written")
+@click.option("--reset", is_flag=True, help="Forget the saved position and start again")
+def follow_cmd(meeting, from_end, reset):
+    """Print digest lines for a Monitor; a re-armed follow resumes where the last one stopped.
+
+    Exits by itself once the feed has finished and every line has been printed.
+    """
+    try:
+        rc = follow(meeting, from_end=from_end, reset=reset)
+    except KeyboardInterrupt:
+        rc = 0
+    raise SystemExit(rc)
 
 
 @live.command("transcript")

@@ -111,15 +111,16 @@ Once configured, you can ask Claude:
 ```bash
 ff-live meetings                        # what Fireflies is transcribing now
 ff-live run -m <id> --watch terms.txt   # stream one meeting until it ends (explicit id required)
+ff-live follow -m <id>                  # digest lines for a Monitor; resumes where it stopped, exits when the feed ends
 ff-live status | transcript -n 40 | stop
 ff-live replay events.jsonl --speed 5   # re-run a recorded session through the pipeline
 ```
 
 Output goes to `~/.claude/personal/live/<id>/` (mode 0700; `FF_LIVE_DIR` overrides): `digest.log` has one line per window, which is what Monitor tails; `transcript.txt` holds settled lines, `status.json` the daemon state, and `events.jsonl` the raw events. Control lines in the digest start with `## `.
 
-Limits to know: speech said before you join, or during a disconnect or restart, is never delivered, so the post-meeting Fireflies transcript stays the complete record. Monitor can cut long digest lines; when a line ends in `...(truncated)`, read `ff-live transcript -n 5`.
+Limits to know: speech said before you join, or during a disconnect or restart, is never delivered, so the post-meeting Fireflies transcript stays the complete record. Digest lines are capped at 400 characters (`--max-chars`) to stay under Monitor's cut-off; when a line ends in `…(+N chars, see transcript)` or `...(truncated)`, read `ff-live transcript -n 5`.
 
-In Claude Code: `tail -n0 -F ~/.claude/personal/live/<id>/digest.log` as a Monitor command. The `meeting-listen` skill in the workspace wraps the whole flow, including relaying to another session.
+In Claude Code, the Monitor command is `ff-live follow -m <id>`. It saves its read position, so re-arming after Monitor's 30-minute expiry neither repeats nor misses lines, and it exits by itself when the feed ends (`--reset` starts over, `--from-end` skips what's already written). The `meeting-listen` skill in the workspace wraps the whole flow, including relaying to another session.
 
 ## Development
 

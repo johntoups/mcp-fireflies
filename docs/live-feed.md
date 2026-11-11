@@ -87,14 +87,16 @@ Source: each run's `status.json`, the `## ` control lines in `digest.log`, and `
 **Found in the second run:**
 - **A restart in the same meeting resets `status.json`.** After the restart it showed 253 events, which is the second connection's count, while `events.jsonl` held both connections' 804 broadcasts. Speech between the stop (10:49:53) and the restart (10:52:29) was not received. Read counts across a restart from `events.jsonl`, not `status.json`.
 
-## Open issues
+## Fixes (2026-11-11)
 
-These are all from the 11-10 run and are not fixed in the code yet:
+| Issue | Fix | Verified |
+|---|---|---|
+| Monitor cut long digest lines | `--max-chars` defaults to 400 (`DEFAULT_MAX_CHARS`) | Replaying the 11-10 run gives 114 lines, at most 400 characters (412 bytes). Not yet verified in a live Monitor |
+| End check failed with a bare `ConnectError:` | One `httpx.AsyncClient` for the whole run; failures are logged with `describe_exc`: type, message or repr, and the cause chain. The error also goes to `last_error` | Unit test with a chained exception; two calls through one shared client against the real endpoint. The cause of the 11-10 failures is still unknown, and the next failure will show it |
+| Monitor's 30-minute cap; re-arming replayed lines | `ff-live follow` prints digest lines and saves its position in `follow.offset` after each one, so a re-armed follow neither repeats nor misses lines. It exits by itself once the feed has finished, or reports a feed process that died without a final state | Unit tests. The cap itself is Monitor's (1,800,000 ms) and can't be changed from here |
+| `status.json` counts reset on a restart | A new run in the same meeting directory carries over events, chunks, settled, late revisions and digests, and adds `runs` and `first_started_at` | Unit test |
 
-- Monitor truncation of long digest lines (`--max-chars` is still 700 by default).
-- The active-meeting check: log the full exception, and reuse one `httpx.AsyncClient` instead of opening one per check (`live.py` still opens one per call).
-- Monitor's 30-minute cap needs restarts, and a restart replays lines.
-- `status.json` counts reset on a restart (above).
+Still open: speech said during a restart or disconnect is never delivered. That is the server's behaviour.
 
 ## Still not verified
 
@@ -104,6 +106,6 @@ These are all from the 11-10 run and are not fixed in the code yet:
 ## Live run checklist
 
 1. Pick a meeting with no PHI and confirm that with John. The Fireflies bot must be in it.
-2. `ff-live meetings`, then `ff-live run -m <id> --window 30`, then Monitor on `digest.log`.
-3. Afterwards, check `status.json`: `late_revisions`, `events`/`chunks`, and `last_error`. If the feed was restarted, take counts from `events.jsonl` instead. Compare `transcript.txt` with the Fireflies transcript once it syncs.
+2. `ff-live meetings`, then `ff-live run -m <id> --window 30`, then a Monitor running `ff-live follow -m <id>` (timeout 1800000; re-arm the same command on expiry).
+3. Afterwards, check `status.json`: `late_revisions`, `events`/`chunks`, `runs`, and `last_error`. Compare `transcript.txt` with the Fireflies transcript once it syncs.
 4. Keep `events.jsonl` (no PHI) as a real fixture for `ff-live replay` and tests, then update this document's Not verified list.

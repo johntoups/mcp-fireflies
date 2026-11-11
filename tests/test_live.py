@@ -315,3 +315,124 @@ async def test_user_stop_is_not_reported_as_a_drop(tmp_path):
     digest = (w.dir / "digest.log").read_text()
     assert "reconnecting" not in digest
     assert digest.rstrip().endswith("stopped by user")
+
+
+# ---------------------------------------------------------------- 2026-11-11 fixes
+
+
+def test_describe_exc_shows_empty_message_and_cause_chain():
+    class ConnectError(Exception):
+        pass
+
+    try:
+        try:
+            raise OSError("connection reset by peer")
+        except OSError as inner:
+            raise ConnectError("") from inner
+    except ConnectError as e:
+        text = live.describe_exc(e)
+    assert text.startswith("ConnectError ConnectError(")
+    assert text.endswith("<- OSError: connection reset by peer")
+
+
+def test_restart_in_same_meeting_keeps_counts(tmp_path):
+    clk = FakeClock()
+    feed = LiveFeed(LiveWriter("T9", root=tmp_path), settle_s=1, window_s=1, clock=clk)
+    feed.on_event("transcription.broadcast", ev("c1", "first run"))
+    feed.finish("stopped", "stopped by user")
+    w2 = LiveWriter("T9", root=tmp_path)
+    feed2 = LiveFeed(w2, settle_s=1, window_s=1, clock=clk)
+    feed2.on_event("transcription.broadcast", ev("c2", "second run"))
+    feed2.finish("stopped", "stopped by user")
+    st = json.loads((tmp_path / "T9/status.json").read_text())
+    assert st["events"] == 2 and st["chunks"] == 2 and st["settled"] == 2 and st["digests"] == 2
+    assert st["runs"] == 2 and st["first_started_at"] <= st["started_at"]
+    # a different meeting starts from zero
+    assert LiveWriter("T10", root=tmp_path).status.runs == 1
+
+
+def _status(d, state, pid):
+    (d / "status.json").write_text(json.dumps({"transcript_id": d.name, "state": state, "pid": pid}))
+
+
+def test_follow_resumes_without_repeats_and_exits_when_feed_ends(tmp_path):
+    import os
+
+    d = tmp_path / "M1"
+    d.mkdir()
+    (d / "digest.log").write_text("## 10:00:00 connected to M1\nline one\n")
+    _status(d, "connected", os.getpid())
+    got, calls = [], []
+
+    def sleep(_):
+        calls.append(1)
+        if len(calls) == 1:  # the feed writes a line, a partial line, then ends
+            with (d / "digest.log").open("a") as f:
+                f.write("line two\npart")
+        elif len(calls) == 2:
+            with (d / "digest.log").open("a") as f:
+                f.write("ial\n## 10:05:00 meeting no longer active; feed ended\n")
+            _status(d, "ended", None)
+
+    rc = live.follow("M1", root=tmp_path, emit=got.append, sleep=sleep)
+    assert rc == 0
+    assert got == [
+        "## 10:00:00 connected to M1",
+        "line one",
+        "line two",
+        "partial",
+        "## 10:05:00 meeting no longer active; feed ended",
+    ]
+    # a re-armed follow prints nothing it already printed
+    again = []
+    assert live.follow("M1", root=tmp_path, emit=again.append, sleep=lambda _: None) == 0
+    assert again == []
+    # --reset starts over
+    again = []
+    live.follow("M1", root=tmp_path, emit=again.append, reset=True, sleep=lambda _: None)
+    assert again == got
+
+
+def test_follow_reports_a_feed_that_died_without_a_final_state(tmp_path):
+    d = tmp_path / "M2"
+    d.mkdir()
+    (d / "digest.log").write_text("line one\n")
+    _status(d, "connected", None)
+    got = []
+    assert live.follow("M2", root=tmp_path, emit=got.append, sleep=lambda _: None) == 1
+    assert got[0] == "line one" and got[-1].startswith("## follow: feed process is not running")
+
+
+async def test_failed_end_check_logs_the_cause(tmp_path):
+    app, runner, url = await _serve(pace=0.01)
+    calls = []
+
+    async def check():
+        calls.append(1)
+        if len(calls) == 1:
+            try:
+                raise OSError("dns lookup failed")
+            except OSError as e:
+                raise RuntimeError("") from e
+        return []
+
+    try:
+        w = LiveWriter(ff.TID, root=tmp_path)
+        state = await asyncio.wait_for(
+            live.run_live(
+                LiveFeed(w, settle_s=0.1, window_s=0.3),
+                "test-key",
+                ff.TID,
+                url=url,
+                tick_s=0.05,
+                end_check_s=0.2,
+                active_check=check,
+            ),
+            15,
+        )
+    finally:
+        await runner.cleanup()
+    assert state == "ended"
+    digest = (w.dir / "digest.log").read_text()
+    assert "active-meeting check failed: RuntimeError" in digest
+    assert "<- OSError: dns lookup failed" in digest

@@ -43,6 +43,25 @@ query ActiveMeetings {
 }
 """
 
+# Monitor cut notifications at about 400-500 characters in the 2026-11-10 run,
+# so the default digest cap stays under that.
+DEFAULT_MAX_CHARS = 400
+TERMINAL_STATES = ("ended", "error", "stopped")
+
+
+def describe_exc(e: BaseException) -> str:
+    """Type, message and cause chain. httpx.ConnectError can have an empty str(),
+    which is what made the 2026-11-10 end-check failures unreadable."""
+    parts: list[str] = []
+    seen: set[int] = set()
+    cur: BaseException | None = e
+    while cur is not None and id(cur) not in seen and len(parts) < 5:
+        seen.add(id(cur))
+        msg = str(cur)
+        parts.append(f"{type(cur).__name__}: {msg}" if msg else f"{type(cur).__name__} {cur!r}")
+        cur = cur.__cause__ or cur.__context__
+    return " <- ".join(parts)
+
 
 # --------------------------------------------------------------------------- model
 
@@ -198,6 +217,8 @@ class LiveStatus:
     digests: int = 0
     last_error: str | None = None
     session_dir: str = ""
+    runs: int = 1  # feed processes that have written to this directory
+    first_started_at: str | None = None
 
 
 class LiveWriter:
@@ -212,6 +233,22 @@ class LiveWriter:
         self.digest_path = self.dir / "digest.log"
         self.status_path = self.dir / "status.json"
         self.status = LiveStatus(transcript_id, title=title, session_dir=str(self.dir))
+        self.status.first_started_at = self.status.started_at
+        # A restart in the same meeting appends to events.jsonl and transcript.txt,
+        # so the counts carry over too (before 2026-11-11 they reset to this run only).
+        self.base_chunks = 0
+        self.base_late_revisions = 0
+        prior = self._prior_status()
+        if prior:
+            for k in ("events", "settled", "digests"):
+                setattr(self.status, k, int(prior.get(k) or 0))
+            self.base_chunks = int(prior.get("chunks") or 0)
+            self.base_late_revisions = int(prior.get("late_revisions") or 0)
+            self.status.chunks = self.base_chunks
+            self.status.late_revisions = self.base_late_revisions
+            self.status.runs = int(prior.get("runs") or 1) + 1
+            self.status.first_started_at = prior.get("first_started_at") or prior.get("started_at")
+            self.status.title = title or prior.get("title")
         current = Path(root) / "current"
         try:
             if current.is_symlink() or current.exists():
@@ -220,6 +257,13 @@ class LiveWriter:
         except OSError:
             pass
         self.write_status()
+
+    def _prior_status(self) -> dict | None:
+        try:
+            st = json.loads(self.status_path.read_text())
+        except (OSError, ValueError):
+            return None
+        return st if st.get("transcript_id") == self.status.transcript_id else None
 
     def _append(self, path: Path, line: str) -> None:
         with path.open("a", encoding="utf-8") as f:
@@ -267,7 +311,7 @@ class LiveFeed:
         settle_s: float = 4.0,
         window_s: float = 60.0,
         terms: list[str] | None = None,
-        max_chars: int = 700,
+        max_chars: int = DEFAULT_MAX_CHARS,
         clock: Callable[[], float] = time.monotonic,
     ):
         self.writer = writer
@@ -284,7 +328,7 @@ class LiveFeed:
         ev = parse_event(data)
         if ev is not None:
             self.merger.ingest(ev)
-            self.writer.status.chunks = len(self.merger.chunks)
+            self.writer.status.chunks = self.writer.base_chunks + len(self.merger.chunks)
 
     def tick(self, force: bool = False) -> None:
         """Settle quiet chunks; flush the digest window when it is due (or forced)."""
@@ -300,7 +344,9 @@ class LiveFeed:
             self._window = []
         if due or force:
             self._window_started = self.clock()
-        self.writer.status.late_revisions = self.merger.late_revisions
+        self.writer.status.late_revisions = (
+            self.writer.base_late_revisions + self.merger.late_revisions
+        )
         self.writer.write_status()
 
     def finish(self, state: str, msg: str) -> None:
@@ -310,16 +356,23 @@ class LiveFeed:
         self.writer.write_status()
 
 
-async def fetch_active_meetings(api_key: str) -> list[dict]:
+def _http_client(api_key: str):
     import httpx
 
-    async with httpx.AsyncClient(headers={"Authorization": f"Bearer {api_key}"}, timeout=30) as c:
-        r = await c.post("https://api.fireflies.ai/graphql", json={"query": ACTIVE_MEETINGS_QUERY})
-        r.raise_for_status()
-        data = r.json()
-        if "errors" in data:
-            raise ValueError(f"GraphQL errors: {data['errors']}")
-        return data.get("data", {}).get("active_meetings") or []
+    return httpx.AsyncClient(headers={"Authorization": f"Bearer {api_key}"}, timeout=30)
+
+
+async def fetch_active_meetings(api_key: str, client: Any = None) -> list[dict]:
+    """The active_meetings query. Pass `client` to reuse one connection pool (run_live does)."""
+    if client is None:
+        async with _http_client(api_key) as c:
+            return await fetch_active_meetings(api_key, c)
+    r = await client.post("https://api.fireflies.ai/graphql", json={"query": ACTIVE_MEETINGS_QUERY})
+    r.raise_for_status()
+    data = r.json()
+    if "errors" in data:
+        raise ValueError(f"GraphQL errors: {data['errors']}")
+    return data.get("data", {}).get("active_meetings") or []
 
 
 async def run_live(
@@ -395,7 +448,7 @@ async def run_live(
             try:
                 await do_connect()
             except Exception as e:
-                w.control(f"reconnect failed: {type(e).__name__}: {e}")
+                w.control(f"reconnect failed: {describe_exc(e)}")
                 delay = min(delay * 2, 30.0)
 
     reconnect_task: list[asyncio.Task | None] = [None]
@@ -412,8 +465,15 @@ async def run_live(
         if "server" in why and (reconnect_task[0] is None or reconnect_task[0].done()):
             reconnect_task[0] = asyncio.ensure_future(manual_reconnect())
 
+    # One long-lived client for the end checks, instead of a new one per check
+    # (the 2026-11-10 ConnectErrors came from the per-check client).
+    http = None if active_check else _http_client(api_key)
+
     async def is_active() -> bool:
-        ids = await (active_check() if active_check else _default_active(api_key))
+        if active_check:
+            ids = await active_check()
+        else:
+            ids = [m["id"] for m in await fetch_active_meetings(api_key, http)]
         return transcript_id in ids
 
     async def ticker():
@@ -430,17 +490,26 @@ async def run_live(
                     if not await is_active():
                         end("ended", "meeting no longer active; feed ended")
                 except Exception as e:  # a failed check must not kill the feed
-                    w.control(f"active-meeting check failed: {type(e).__name__}: {e}")
+                    w.status.last_error = f"active-meeting check: {describe_exc(e)}"
+                    w.control(f"active-meeting check failed: {describe_exc(e)}")
+
+    async def close_http() -> None:
+        if http is not None:
+            try:
+                await http.aclose()
+            except Exception:
+                pass
 
     try:
         await do_connect()
     except Exception as e:
-        w.status.last_error = f"{type(e).__name__}: {e}"
-        feed.finish("error", f"could not connect: {type(e).__name__}: {e}")
+        w.status.last_error = describe_exc(e)
+        feed.finish("error", f"could not connect: {describe_exc(e)}")
         try:
             await sio.shutdown()  # close the aiohttp session the failed attempt opened
         except Exception:
             pass
+        await close_http()
         return "error"
 
     t = asyncio.create_task(ticker())
@@ -455,12 +524,9 @@ async def run_live(
             reconnect_task[0].cancel()
         if sio.connected:
             await sio.disconnect()
+        await close_http()
         feed.finish(final["state"], final["msg"])
     return final["state"]
-
-
-async def _default_active(api_key: str) -> list[str]:
-    return [m["id"] for m in await fetch_active_meetings(api_key)]
 
 
 async def replay(
@@ -529,6 +595,59 @@ def read_status(meeting: str | None = None, root: Path | None = None) -> dict | 
     except (OSError, TypeError, ValueError):
         st["process_alive"] = False
     return st
+
+
+def follow(
+    meeting: str | None = None,
+    root: Path | None = None,
+    emit: Callable[[str], None] = lambda s: print(s, flush=True),
+    poll_s: float = 0.5,
+    from_end: bool = False,
+    reset: bool = False,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Print digest.log lines for a Monitor, resuming where the last follow stopped.
+
+    Monitor expires after 30 minutes. The read position is saved in follow.offset
+    after every line, so a re-armed follow neither misses nor repeats lines.
+    It returns once the feed is finished and every line has been printed:
+    0 when the feed reached a terminal state, 1 when its process vanished without one.
+    """
+    d = resolve_session(meeting, root)
+    if d is None:
+        emit(f"## follow: no live session for {meeting or 'current'}")
+        return 1
+    digest, off_path = d / "digest.log", d / "follow.offset"
+    if reset and off_path.exists():
+        off_path.unlink()
+    offset = None
+    if off_path.exists():
+        try:
+            offset = int(off_path.read_text().strip())
+        except ValueError:
+            offset = None
+    if offset is None:
+        offset = digest.stat().st_size if (from_end and digest.exists()) else 0
+    while True:
+        if digest.exists():
+            if digest.stat().st_size < offset:  # file replaced; start over
+                offset = 0
+            with digest.open("rb") as f:
+                f.seek(offset)
+                while True:
+                    raw = f.readline()
+                    if not raw.endswith(b"\n"):
+                        break  # nothing more, or a line still being written
+                    emit(raw.decode("utf-8", "replace").rstrip("\n"))
+                    offset = f.tell()
+                    off_path.write_text(str(offset))
+        st = read_status(meeting, root) or {}
+        if st.get("state") in TERMINAL_STATES and not st.get("process_alive"):
+            return 0
+        if st and not st.get("process_alive"):
+            emit(f"## follow: feed process is not running (last state: {st.get('state')}); stopping")
+            return 1
+        sleep(poll_s)
 
 
 def transcript_tail(
