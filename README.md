@@ -117,6 +117,8 @@ ff-live replay events.jsonl --speed 5   # re-run a recorded session through the 
 
 Output goes to `~/.claude/personal/live/<id>/` (mode 0700; `FF_LIVE_DIR` overrides): `digest.log` has one line per window, which is what Monitor tails; `transcript.txt` holds settled lines, `status.json` the daemon state, and `events.jsonl` the raw events. Control lines in the digest start with `## `.
 
+Limits to know: speech said before you join, or during a disconnect or restart, is never delivered, so the post-meeting Fireflies transcript stays the complete record. Monitor can cut long digest lines; when a line ends in `...(truncated)`, read `ff-live transcript -n 5`.
+
 In Claude Code: `tail -n0 -F ~/.claude/personal/live/<id>/digest.log` as a Monitor command. The `meeting-listen` skill in the workspace wraps the whole flow, including relaying to another session.
 
 ## Development

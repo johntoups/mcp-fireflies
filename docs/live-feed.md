@@ -69,15 +69,41 @@ End-to-end in Claude Code: `ff-live run` against the fake server, with Monitor t
 - **The active-meeting check failed** twice near the end with `ConnectError:` and no message. At the same moment a plain curl to the GraphQL endpoint answered, and the socket kept delivering. Cause not identified. Effect: the feed didn't detect the meeting end and was stopped by hand. Next step: log the full exception (`repr(e)` plus the cause chain), and reuse one long-lived `httpx.AsyncClient` instead of opening one per check.
 - **Monitor's 30-minute cap** needed two restarts. Restarting with `tail -n 2 -F` replays the last lines, so expect duplicates.
 
+## Runs on 2026-11-11 (two pharmacy SME meetings)
+
+Source: each run's `status.json`, the `## ` control lines in `digest.log`, and `start_time` values in `events.jsonl`.
+
+| Run | Joined | Events | Ended by | `last_error` |
+|---|---|---|---|---|
+| SME Session, Pharmacy (`01M6CVQB…`) | about 29 min in | 343 events, 69 chunks, 0 late revisions | `meeting no longer active; feed ended` | none |
+| Follow-up meeting (`01M75KMY…`) | about 1 min in; stopped and restarted once | 804 broadcasts across both connections | `stopped by user`, twice | none |
+
+**Confirmed by these runs:**
+- **Joining mid-meeting works, with no backlog.** In the first run the first chunk had `start_time` 1758s and arrived within a second of connecting. Nothing said before the join is delivered; the post-meeting Fireflies transcript is the only record of it.
+- **`start_time` counts seconds from the meeting start.** Subtracting `start_time` from wall-clock arrival gives the same meeting start for every chunk in a run, and on both days. This was checked against wall-clock time, not against the Fireflies transcript.
+- **End detection worked** in the first run: the active-meeting check saw the meeting go and ended the feed by itself. The `ConnectError` from 11-10 did not recur, but nothing has been fixed, so that issue stays open.
+- **Zero late revisions** in both runs, so the 4s settle still holds.
+
+**Found in the second run:**
+- **A restart in the same meeting resets `status.json`.** After the restart it showed 253 events, which is the second connection's count, while `events.jsonl` held both connections' 804 broadcasts. Speech between the stop (10:49:53) and the restart (10:52:29) was not received. Read counts across a restart from `events.jsonl`, not `status.json`.
+
+## Open issues
+
+These are all from the 11-10 run and are not fixed in the code yet:
+
+- Monitor truncation of long digest lines (`--max-chars` is still 700 by default).
+- The active-meeting check: log the full exception, and reuse one `httpx.AsyncClient` instead of opening one per check (`live.py` still opens one per call).
+- Monitor's 30-minute cap needs restarts, and a restart replays lines.
+- `status.json` counts reset on a restart (above).
+
 ## Still not verified
 
 - Exact latency from speech to digest. It felt like the settle time plus up to one window; I haven't measured it.
-- Whether `start_time` is relative to the meeting start. The timestamps lined up with meeting time, but that wasn't checked against the Fireflies transcript.
-- Joining mid-meeting. The bot was in the meeting from the start this time.
+- Whether `start_time` matches the timestamps in the Fireflies post-meeting transcript.
 
 ## Live run checklist
 
 1. Pick a meeting with no PHI and confirm that with John. The Fireflies bot must be in it.
 2. `ff-live meetings`, then `ff-live run -m <id> --window 30`, then Monitor on `digest.log`.
-3. Afterwards, check `status.json`: `late_revisions`, `events`/`chunks`, and `last_error`. Compare `transcript.txt` with the Fireflies transcript once it syncs.
+3. Afterwards, check `status.json`: `late_revisions`, `events`/`chunks`, and `last_error`. If the feed was restarted, take counts from `events.jsonl` instead. Compare `transcript.txt` with the Fireflies transcript once it syncs.
 4. Keep `events.jsonl` (no PHI) as a real fixture for `ff-live replay` and tests, then update this document's Not verified list.
